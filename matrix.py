@@ -72,76 +72,148 @@ patient_list = v2v_patient_list.insert(0,"gi|2050056574|gb|MZ359841.1|") # inser
 patient_list = patient_list.insert(0,"MN908947.3") # add Wuhan-1 as reference 
 
 
-def define_direction(row):
+def define_direction(row): # check for any * mutations, 2 = REF contains *, 3 = ALT contains *, 4 = mutation to mutation
     if row['diff'] == 1:
         val = '(Forward)'
     elif row['diff'] == -1:
         val = '(Reverse)'
-    else:
-        val = '(what)'
+    elif row['diff'] == 2:
+        val = '(n_to_mutated)'
+    elif row['diff'] ==3:
+        val = '(mutated_to_n)'
+    elif row['diff']==4:
+        val = '(mutated_to_mutated)'
     return val
-
-
+#fill box
 def find_n_included_mutations(patient_a, patient_b):
+    mutation_count='placeholder' #to prevent local variable referenced before assignment error
     if patient_a == patient_b:
         output = 'mutation count:0'
+        mutation_count = 0
     else:
         diff_a2b = ann_vcf[patient_b] - ann_vcf[patient_a]
-        if not any(diff_a2b):
-            output = 'mutation count:0'
-        else:
-            mutations_a2b = ann_vcf.loc[diff_a2b!=0, ['Gene_Name','mutation']] # define comparing terms
-            mutations_a2b['diff'] = diff_a2b
-            
-            mutations_a2b['direction'] = mutations_a2b.apply(define_direction,axis=1)
-            mutations_a2b['output_string'] = mutations_a2b['mutation'] + mutations_a2b['direction']
 
+        if not any(diff_a2b): # not any() returns true when all diff_a2b values == 0
+            output = 'mutation count:0'
+            mutation_count = 0
+        else: # we made sure we aren't comparing the same patient, or two patients with equal sequences, now resolve differing variants 
+            mutations_a2b = ann_vcf.loc[diff_a2b!=0, ['REF','POS','ALT','Gene_Name','From_AA','location','To_AA','mutation','AA_mutation']] # define comparing terms
+            mutations_a2b['diff'] = diff_a2b
+
+            dup_variant = mutations_a2b[(mutations_a2b['POS'].duplicated(keep=False))]
+            #resolve different variants in the two patients
+            for conflicts in range(len(dup_variant['POS'].unique())):
+                dup_variant = mutations_a2b[(mutations_a2b['POS'].duplicated(keep=False))]
+                resolved_dup_variant = pd.DataFrame.from_dict(dup_variant.to_dict(),orient='index')
+                #-1 is from, 1 is To at 'diff'
+                from_dup_variant_index = dup_variant.loc[dup_variant['diff']== -1].index[0]
+                to_dup_variant_index = dup_variant.loc[dup_variant['diff']==1].index[0]
+                resolver_row_index = max(from_dup_variant_index,to_dup_variant_index) + 1
+
+                resolved_dup_variant[resolver_row_index] = resolved_dup_variant.loc[:,to_dup_variant_index]
+                resolved_dup_variant.loc['REF',resolver_row_index] = resolved_dup_variant.loc['ALT',from_dup_variant_index]
+                resolved_dup_variant.loc['From_AA',resolver_row_index] = resolved_dup_variant.loc['To_AA',from_dup_variant_index]
+
+                resolved_dup_variant.loc['AA_mutation',resolver_row_index] = resolved_dup_variant.loc['From_AA',resolver_row_index] + resolved_dup_variant.loc['location',resolver_row_index] + resolved_dup_variant.loc['To_AA',resolver_row_index]
+                resolved_dup_variant.loc['mutation',resolver_row_index] = resolved_dup_variant.loc['REF',resolver_row_index] + str(resolved_dup_variant.loc['POS',resolver_row_index]) + resolved_dup_variant.loc['ALT',resolver_row_index] + ',' + resolved_dup_variant.loc['Gene_Name',resolver_row_index] +',' + resolved_dup_variant.loc['AA_mutation',resolver_row_index]
+                resolved_dup_variant.loc['diff',resolver_row_index] = 2 if resolved_dup_variant[resolver_row_index]['REF'] == '*'  else resolved_dup_variant.loc['diff',resolver_row_index]  # check for any * mutations, 2 = REF contains *, 3 = ALT contains *, 4 = mutation to mutation
+                resolved_dup_variant.loc['diff',resolver_row_index] = 3 if resolved_dup_variant[resolver_row_index]['ALT'] == '*' else resolved_dup_variant.loc['diff',resolver_row_index]
+                resolved_dup_variant.loc['diff',resolver_row_index] = 4 if not resolved_dup_variant.loc[['REF','ALT'],resolver_row_index].str.contains('\*').any() else resolved_dup_variant.loc['diff',resolver_row_index]
+
+                mutations_a2b = mutations_a2b.append(resolved_dup_variant[resolver_row_index]).sort_index().drop([from_dup_variant_index,to_dup_variant_index])
+
+            mutations_a2b['direction'] = mutations_a2b.apply(define_direction,axis=1) # apply function on row 
+            mutations_a2b['output_string'] = mutations_a2b['mutation'] + mutations_a2b['direction']
             mutation_count = len(mutations_a2b)
             output = 'mutation_count:' + str(mutation_count) + '\n' + '\n'.join(mutations_a2b['output_string'].apply(str))
-    return output
-
+    return (output,mutation_count)
+#fill row
 def n_included_mutation_comparison_against_all(patient_for_comparison): #define function that creates list for filling in rows 
     Mutation_patient_list = []
+    mutation_count_patient_list = []
     for patient in patient_list:
-        pairwise_mutation = find_n_included_mutations(patient_for_comparison,patient)
+        pairwise_mutation = find_n_included_mutations(patient_for_comparison,patient)[0]
         Mutation_patient_list.append(pairwise_mutation)
-    return Mutation_patient_list
 
+        pairwise_mutation_count = find_n_included_mutations(patient_for_comparison,patient)[1]
+        mutation_count_patient_list.append(pairwise_mutation_count)
+    return Mutation_patient_list, mutation_count_patient_list
+# ------------------------------------------ DF CREATION ---------------------------------------------------------------#
 n_included_df = pd.DataFrame(columns=patient_list,index = patient_list)
 for anchoring_patient in patient_list:
-    n_included_df.loc[anchoring_patient] = n_included_mutation_comparison_against_all(anchoring_patient)
+    n_included_df.loc[anchoring_patient] = n_included_mutation_comparison_against_all(anchoring_patient)[0]
+
+n_included_count_df = pd.DataFrame(columns=patient_list,index = patient_list)
+for anchoring_patient in patient_list:
+    n_included_count_df.loc[anchoring_patient] = n_included_mutation_comparison_against_all(anchoring_patient)[1]
+# ------------------------------------------END OF FIRST SET DF CREATION ------------------------------------------------#
+
+# Define functions for exlcuding mutations that involves unknonwn nucleotides
 
 def find_true_mutations(patient_a, patient_b): # excludes unknown nucleotides
+    mutation_count='placeholder' #to prevent local variable referenced before assignment error
     if patient_a == patient_b:
         output = 'mutation count:0'
+        mutation_count = 0
     else:
         diff_a2b = ann_vcf[patient_b] - ann_vcf[patient_a]
-        if not any(diff_a2b):
+
+        if not any(diff_a2b): # not any() returns true when all diff_a2b values == 0
             output = 'mutation count:0'
-        else:
-            mutations_a2b = ann_vcf.loc[diff_a2b!=0, ['Gene_Name','mutation']] # define comparing terms
+            mutation_count = 0
+        else: # we made sure we aren't comparing the same patient, or two patients with equal sequences, now resolve differing variants 
+            mutations_a2b = ann_vcf.loc[diff_a2b!=0, ['REF','POS','ALT','Gene_Name','From_AA','location','To_AA','mutation','AA_mutation']] # define comparing terms
             mutations_a2b['diff'] = diff_a2b
+            
+            dup_variant = mutations_a2b[(mutations_a2b['POS'].duplicated(keep=False))]
+            #resolve different variants in the two patients
+            for conflicts in range(len(dup_variant['POS'].unique())):
+                dup_variant = mutations_a2b[(mutations_a2b['POS'].duplicated(keep=False))]
+                resolved_dup_variant = pd.DataFrame.from_dict(dup_variant.to_dict(),orient='index')
+                #-1 is from, 1 is To at 'diff'
+                from_dup_variant_index = dup_variant.loc[dup_variant['diff']== -1].index[0]
+                to_dup_variant_index = dup_variant.loc[dup_variant['diff']==1].index[0]
+                resolver_row_index = max(from_dup_variant_index,to_dup_variant_index) + 1
+
+                resolved_dup_variant[resolver_row_index] = resolved_dup_variant.loc[:,to_dup_variant_index]
+                resolved_dup_variant.loc['REF',resolver_row_index] = resolved_dup_variant.loc['ALT',from_dup_variant_index]
+                resolved_dup_variant.loc['From_AA',resolver_row_index] = resolved_dup_variant.loc['To_AA',from_dup_variant_index]
+
+                resolved_dup_variant.loc['AA_mutation',resolver_row_index] = resolved_dup_variant.loc['From_AA',resolver_row_index] + resolved_dup_variant.loc['location',resolver_row_index] + resolved_dup_variant.loc['To_AA',resolver_row_index]
+                resolved_dup_variant.loc['mutation',resolver_row_index] = resolved_dup_variant.loc['REF',resolver_row_index] + str(resolved_dup_variant.loc['POS',resolver_row_index]) + resolved_dup_variant.loc['ALT',resolver_row_index] + ',' + resolved_dup_variant.loc['Gene_Name',resolver_row_index] +',' + resolved_dup_variant.loc['AA_mutation',resolver_row_index]
+                resolved_dup_variant.loc['diff',resolver_row_index] = 2 if resolved_dup_variant[resolver_row_index]['REF'] == '*'  else resolved_dup_variant.loc['diff',resolver_row_index]  # check for any * mutations, 2 = REF contains *, 3 = ALT contains *, 4 = mutation to mutation
+                resolved_dup_variant.loc['diff',resolver_row_index] = 3 if resolved_dup_variant[resolver_row_index]['ALT'] == '*' else resolved_dup_variant.loc['diff',resolver_row_index]
+                resolved_dup_variant.loc['diff',resolver_row_index] = 4 if not resolved_dup_variant.loc[['REF','ALT'],resolver_row_index].str.contains('\*').any() else resolved_dup_variant.loc['diff',resolver_row_index]
+
+                mutations_a2b = mutations_a2b.append(resolved_dup_variant[resolver_row_index]).sort_index().drop([from_dup_variant_index,to_dup_variant_index])
             
             mutations_a2b['direction'] = mutations_a2b.apply(define_direction,axis=1)
             mutations_a2b['output_string'] = mutations_a2b['mutation'] + mutations_a2b['direction']
-            mutations_a2b = mutations_a2b[~mutations_a2b.output_string.str.contains("\*")] # exclude rows where there is a * included
-
+            mutations_a2b = mutations_a2b[~mutations_a2b.output_string.str.contains("\*")] ### exclude rows where there is a * included
             mutation_count = len(mutations_a2b)
             output = 'mutation_count:' + str(mutation_count) + '\n' + '\n'.join(mutations_a2b['output_string'].apply(str))
-    return output
+    return (output,mutation_count)
 
 def true_mutation_comaprison_against_all(patient_for_comparison): #define function that creates list for filling in rows 
     Mutation_patient_list = []
+    mutation_count_patient_list = []
     for patient in patient_list:
-        pairwise_mutation = find_true_mutations(patient_for_comparison,patient)
+        pairwise_mutation = find_true_mutations(patient_for_comparison,patient)[0]
         Mutation_patient_list.append(pairwise_mutation)
-    return Mutation_patient_list
+
+        pairwise_mutation_count = find_true_mutations(patient_for_comparison,patient)[1]
+        mutation_count_patient_list.append(pairwise_mutation_count)
+    return Mutation_patient_list, mutation_count_patient_list
 
 n_not_included_df =  pd.DataFrame(columns=patient_list,index = patient_list)
 for anchoring_patient in patient_list:
-    n_not_included_df.loc[anchoring_patient] = true_mutation_comaprison_against_all(anchoring_patient)
+    n_not_included_df.loc[anchoring_patient] = true_mutation_comaprison_against_all(anchoring_patient)[0]
 
-#write to excel file
+n_not_included_count_df = pd.DataFrame(columns=patient_list,index = patient_list)
+for anchoring_patient in patient_list:
+    n_not_included_count_df.loc[anchoring_patient] = true_mutation_comaprison_against_all(anchoring_patient)[1]
+
+#---------------------------------- write to excel file --------------------------------------------------------------
 from openpyxl import Workbook
 from openpyxl.reader.excel import load_workbook
 
@@ -151,6 +223,12 @@ from openpyxl.reader.excel import load_workbook
 # title = re.sub(INVALID_TITLE_REGEX,'_',output_path)
 
 with pd.ExcelWriter(output_path, engine = 'openpyxl') as writer:
+    #n_included
     n_included_df.to_excel(writer, sheet_name = 'n_included', index = True)
+    n_included_count_df.to_excel(writer,sheet_name='n_included_dists',index=True)
+    #n_not_included
     n_not_included_df.to_excel(writer, sheet_name='n_not_included', index = True)
+    n_not_included_count_df.to_excel(writer,sheet_name='n_not_included_dists',index=True)
     writer.save()
+
+print(f'completed:{output_path}')
