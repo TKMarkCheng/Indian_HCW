@@ -1,3 +1,6 @@
+In-house script for Kemp, S.A., Cheng, M.T.K., Hamilton, W.L. et al. Transmission of B.1.617.2 Delta variant between vaccinated healthcare workers. Sci Rep 12, 10492 (2022). https://doi.org/10.1038/s41598-022-14411-7
+
+
 # Indian_HCW
 
 ## 8th Sept 2021
